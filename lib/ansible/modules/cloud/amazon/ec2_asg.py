@@ -172,6 +172,31 @@ options:
     default: []
     choices: ['Launch', 'Terminate', 'HealthCheck', 'ReplaceUnhealthy', 'AZRebalance', 'AlarmNotification', 'ScheduledActions', 'AddToLoadBalancer']
     version_added: "2.3"
+  metrics_collection:
+    description:
+      - Enable group metrics collection for the auto scaling group.
+    required: False
+    version_added: "2.4"
+  metrics_granularity:
+    description:
+      - The granularity to associate with the metrics to collect. The only valid value is 1Minute.
+    required: False
+    default: "1Minute"
+    version_added: "2.4"
+  metrics_members:
+    description:
+      - Group metrics to collect when collection is enabled.
+    required: False
+    default:
+      - GroupMinSize
+      - GroupMaxSize
+      - GroupDesiredCapacity
+      - GroupInServiceInstances
+      - GroupPendingInstances
+      - GroupStandbyInstances
+      - GroupTerminatingInstances
+      - GroupTotalInstances
+    version_added: "2.4"
 extends_documentation_fragment:
     - aws
     - ec2
@@ -684,7 +709,9 @@ def perform_asg_change(asg_def, module):
     filter_out = [
         'AutoScalingGroupARN',
         'CreatedTime',
-        'EnabledMetrics',
+        'Metrics',
+        'EnableMetrics',
+        'Granularity',
         'Instances',
         'LoadBalancerNames',
         'SuspendedProcesses',
@@ -705,6 +732,13 @@ def perform_asg_change(asg_def, module):
         ))
         try:
             create_asg_def = asg_def.copy()
+
+            # Remove internal-only keys that are for setting up metrics
+            # collection
+            create_asg_def.pop('EnableMetrics', None)
+            create_asg_def.pop('Metrics', None)
+            create_asg_def.pop('Granularity', None)
+
             suspended_processes = create_asg_def.pop('SuspendedProcesses', [])
             if create_asg_def.get('PlacementGroup') is None:
                 create_asg_def.pop('PlacementGroup', None)
@@ -754,6 +788,80 @@ def perform_asg_change(asg_def, module):
     requested_update_lb_names = asg_def.get('LoadBalancerNames', [])
     requested_update_target_arns = asg_def.get('TargetGroupARNs', [])
     requested_suspended_processes = asg_def.get('SuspendedProcesses', [])
+
+    if 'EnableMetrics' in asg_def and asg_def['EnableMetrics']:
+        # Make a dict of the metrics that are desired
+        requested_metrics = {
+            metric: asg_def['Granularity']
+            for metric in asg_def.get('EnabledMetrics', [])
+        }
+        # Make a dict of the metrics that are currently enabled
+        current_metrics = {
+            m['Metric']: m['Granularity']
+            for m in existing_group_details.get('EnabledMetrics', [])
+        }
+
+        # If the desired metrics specification differs from the currently
+        # present ones, enact change
+        if requested_metrics != current_metrics:
+            changed = True
+            log.debug("zxc: Updating metrics:\n{0}".format(
+                str(requested_metrics)
+            ))
+
+            # Enable desired metrics
+            try:
+                log.debug("zxc: Enabling metrics: {0}".format(
+                    ", ".join(requested_metrics.keys())
+                ))
+                client.enable_metrics_collection(
+                    AutoScalingGroupName=asg_def['AutoScalingGroupName'],
+                    Metrics=requested_metrics.keys(),
+                    Granularity=requested_metrics.values()[0])
+            except botocore.exceptions.ClientError as e:
+                module.fail_json(
+                    msg="Failed to create or update metrics: {0}".format(
+                        str(e)
+                    ),
+                    exception=trackback.format_exc(e)
+                )
+
+            # Disable any remaining metrics that are not desired
+            disable_metrics = [
+                metric for metric in current_metrics.keys()
+                if metric not in requested_metrics
+            ]
+            if any(disable_metrics):
+                try:
+                    log.debug("zxc: Disabling metrics: {0}".format(
+                        ", ".join(requested_metrics.keys())
+                    ))
+                    client.disable_metrics_collection(
+                        AutoScalingGroupName=asg_def['AutoScalingGroupName'],
+                        Metrics=disable_metrics
+                    )
+                except botocore.exceptions.ClientError as e:
+                    module.fail_json(
+                        msg="Failed to disable metrics: {0}".format(
+                            str(e)
+                        ),
+                        exception=trackback.format_exc(e)
+                    )
+
+    elif 'EnableMetrics' in asg_def and not asg_def['EnableMetrics']:
+        # Disable all metrics collection
+        try:
+            log.debug("zxc: Disabling all metrics")
+            client.disable_metrics_collection(
+                AutoScalingGroupName=asg_def['AutoScalingGroupName'],
+                Metrics=[])
+        except botocore.exceptions.ClientError as e:
+            module.fail_json(
+                msg="Failed to disable metrics: {0}".format(
+                    str(e)
+                ),
+                exception=trackback.format_exc(e)
+            )
 
     if asg_diff(existing_group, requested_update_group):
         changed = True
@@ -946,6 +1054,9 @@ def create_autoscaling_group(module):
     notification_topic = module.params.get('notification_topic')
     notification_types = module.params.get('notification_types')
     suspend_processes = module.params['suspend_processes']
+    metrics_collection = module.params.get('metrics_collection')
+    metrics_granularity = module.params.get('metrics_granularity')
+    metrics_members = module.params.get('metrics_members')
     changed = False
 
     asg_client = get_client('autoscaling', module)
@@ -993,6 +1104,9 @@ def create_autoscaling_group(module):
         # 'NewInstancesProtectedFromScaleIn': True|False,
         'Tags': asg_tags,
         'SuspendedProcesses': suspend_processes,
+        'EnableMetrics': metrics_collection,
+        'Metrics': metrics_members,
+        'Granularity': metrics_granularity,
     }
 
     log.debug("zxc: About to perform the base asg change")
@@ -1308,7 +1422,19 @@ def main():
                 'autoscaling:EC2_INSTANCE_TERMINATE',
                 'autoscaling:EC2_INSTANCE_TERMINATE_ERROR'
             ]),
-            suspend_processes=dict(type='list', default=[])
+            suspend_processes=dict(type='list', default=[]),
+            metrics_collection=dict(type='bool', default=True),
+            metrics_granularity=dict(type='str', default='1Minute'),
+            metrics_members=dict(type='list', default=[
+                'GroupMinSize',
+                'GroupMaxSize',
+                'GroupDesiredCapacity',
+                'GroupInServiceInstances',
+                'GroupPendingInstances',
+                'GroupStandbyInstances',
+                'GroupTerminatingInstances',
+                'GroupTotalInstances',
+            ]),
         ),
     )
 
