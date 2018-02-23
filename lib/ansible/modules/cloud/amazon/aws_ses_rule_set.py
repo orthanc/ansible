@@ -27,11 +27,11 @@ ANSIBLE_METADATA = {'metadata_version': '1.0',
 
 DOCUMENTATION = """
 ---
-module: ses_rule_set
+module: aws_ses_rule_set
 short_description: Manages SES inbound receipt rule sets
 description:
-    - The M(ses_rule_set) module allows you to create, delete, and manage SES receipt rule sets
-version_added: 2.4
+    - The M(aws_ses_rule_set) module allows you to create, delete, and manage SES receipt rule sets
+version_added: 2.6
 author:
   - "Ben Tomasik (@tomislacker)"
 requirements: [ "boto3","botocore" ]
@@ -59,12 +59,12 @@ EXAMPLES = """
 # It is assumed that their matching environment variables are set.
 ---
 - name: Create default rule set and activate it if not already
-  ses_rule_set:
+  aws_ses_rule_set:
     name: default-rule-set
     is_active: yes
 
 - name: Create some arbitrary rule set but do not activate it
-  ses_rule_set:
+  aws_ses_rule_set:
     name: arbitrary-rule-set
 """
 
