@@ -27,7 +27,7 @@ ANSIBLE_METADATA = {'metadata_version': '1.0',
 
 DOCUMENTATION = """
 ---
-module: ses_rule
+module: aws_ses_rule
 short_description: Manages SES inbound receipt rules
 description:
     - Allows creation, deletion, and management of SES receipt rules
@@ -85,7 +85,7 @@ EXAMPLES = """
 # Pushes emails to S3 that are received for any address @mydomain.com as well
 # as any address @<any subdomain>.mydomain.com
 - name: Create catch-all rule
-  ses_rule:
+  aws_ses_rule:
     name: main-rule
     ruleset: default-rule-set
     recipients:
