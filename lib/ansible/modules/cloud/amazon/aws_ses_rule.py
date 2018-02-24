@@ -20,7 +20,7 @@
 # along with Ansible. If not, see <http://www.gnu.org/licenses/>.
 
 
-ANSIBLE_METADATA = {'metadata_version': '1.0',
+ANSIBLE_METADATA = {'metadata_version': '1.1',
                     'status': ['preview'],
                     'supported_by': 'community'}
 
@@ -103,27 +103,171 @@ changed:
       if a SES rule has been created or deleted. NOTE: If a rule exists, it's
       always considered a change whether or not one occurred due to the lack
       of implementation in change detection.
-  returned: always
+  returned: success
   type: bool
-  sample:
-    changed: true
+  sample: true
+rules:
+  description: >
+      The rules that are present after any changes being made by the module.
+  returned: success
+  type: list
+  sample: [TODO]
+error:
+    description: The details of the error response from AWS.
+    returned: on client error from AWS
+    type: complex
+    sample: {
+        "code": "InvalidParameterValue",
+        "message": "Feedback notification topic is not set.",
+        "type": "Sender"
+    }
+    contains:
+        code:
+            description: The AWS error code.
+            type: string
+        message:
+            description: The AWS error message.
+            type: string
+        type:
+            description: The AWS error type.
+            type: string
 """
 
 from ansible.module_utils.basic import AnsibleModule
 from ansible.module_utils.ec2 import HAS_BOTO3
 from ansible.module_utils.ec2 import ec2_argument_spec
 from ansible.module_utils.ec2 import get_aws_connection_info
+from ansible.module_utils.ec2 import camel_dict_to_snake_dict
 from ansible.module_utils.ec2 import boto3_conn
 
+import traceback
 
-def rule_set_exists(ses_client, name):
-    rule_sets = ses_client.list_receipt_rule_sets()['RuleSets']
-    return len([s for s in rule_sets if s['Name'].lower() == name.lower()]) > 0
+try:
+    from botocore.exceptions import BotoCoreError, ClientError
+    from botocore.config import Config
+except ImportError:
+    pass  # caught by imported HAS_BOTO3
 
 
-def rule_exists(ses_client, ruleset, name):
-    rules = ses_client.describe_receipt_rule_set(RuleSetName=ruleset)['Rules']
-    return len([r for r in rules if r['Name'].lower() == name.lower()]) > 0
+def call_and_handle_errors(module, method, **kwargs):
+    try:
+        return method(**kwargs)
+    except ClientError as e:
+        module.fail_json(msg=str(e), exception=traceback.format_exc(),
+                         **camel_dict_to_snake_dict(e.response))
+    except BotoCoreError as e:
+        module.fail_json(msg=str(e), exception=traceback.format_exc())
+
+
+def rule_set_exists(module, ses_client, name):
+    rule_sets = call_and_handle_errors(module, ses_client.list_receipt_rule_sets)['RuleSets']
+    return any((s for s in rule_sets if s['Name'] == name))
+
+
+def list_rules(module, ses_client, ruleset):
+    return call_and_handle_errors(module, ses_client.describe_receipt_rule_set, RuleSetName=ruleset)['Rules']
+
+
+def find_rule(module, name, rules):
+    matching_rules = [r for r in rules if r['Name'] == name]
+    count = len(matching_rules)
+    if count == 0:
+        return None
+    elif count == 1:
+        return matching_rules[0]
+    else:
+        module.fail_json(msg='More than one rule found with name ' + name)
+
+
+def rule_is_after(name, after, rules):
+    return any((i for i, r in enumerate(rules) if r['Name'] == name and i > 0 and rules[i - 1]['Name'] == after))
+
+
+def replace_rule(new_rule, test_rule):
+    if new_rule['Name'] == test_rule['Name']:
+        return new_rule
+    else:
+        return test_rule
+
+
+def remove_rule(client, module):
+    name = module.params.get('name').lower()
+    ruleset = module.params.get('ruleset').lower()
+    check_mode = module.check_mode
+
+    changed = False
+    rules = list_rules(module, client, ruleset)
+    existing_rule = find_rule(module, name, rules)
+    if exsting_rule is not None:
+        if not check_mode:
+            call_and_handle_errors(module, client.delete_receipt_rule, RuleSetName=ruleset, RuleName=name)
+        changed = True
+        rules = [r for r in rules if r['Name'] != name]
+
+    module.exit_json(
+        changed=changed,
+        rules=[camel_dict_to_snake_dict(r) for f in rules],
+    )
+
+
+def create_or_update_rule(client, module):
+    name = module.params.get('name').lower()
+    ruleset = module.params.get('ruleset').lower()
+    after = module.params.get('after')
+    enabled = module.params.get('enabled')
+    tls_required = module.params.get('tls_required')
+    recipients = module.params.get('recipients')
+    actions = module.params.get('actions')
+    scan_enabled = module.params.get('scan_enabled')
+    check_mode = module.check_mode
+
+    rule_args = {
+        'RuleSetName': ruleset,
+        'Rule': {
+            'Name': name,
+            'Enabled': enabled,
+            'TlsPolicy': "Require" if tls_required else "Optional",
+            'Recipients': recipients,
+            'Actions': actions,
+            'ScanEnabled': scan_enabled,
+        },
+    }
+
+    rules = list_rules(module, client, ruleset)
+    existing_rule = find_rule(module, name, rules)
+    create = existing_rule is None
+    recreate = not create and after and not rule_is_after(name, after, rules)
+
+    changed = False
+    if create or recreate:
+        if after:
+            rule_args.update({
+                'After': after.lower(),
+            })
+
+        if not check_mode:
+            if recreate:
+                call_and_handle_errors(module, client.delete_receipt_rule, RuleSetName=ruleset, RuleName=name)
+            call_and_handle_errors(module, client.create_receipt_rule, **rule_args)
+        changed = True
+
+        rules = [r for r in rules if r['Name'] != name]
+        if after:
+            index = [i for i, r in enumerate(rules) if r['Name'] == after][0] + 1
+            rules.insert(index, rule_args)
+        else:
+            rules.append(rule_args)
+    # TODO Check this condition actually works....
+    else if existing_rule != rule_args:
+        if not check_mode:
+            call_and_handle_errors(module, client.update_receipt_rule, **rule_args)
+        changed = True
+        rules = [replace_rule(rule_args, r) for r in rules]
+
+    module.exit_json(
+        changed=changed,
+        rules=[camel_dict_to_snake_dict(r) for f in rules],
+    )
 
 
 def main():
@@ -146,18 +290,7 @@ def main():
                                ['state', 'present', ['actions', 'recipients']],
                            ])
 
-    name = module.params.get('name').lower()
-    ruleset = module.params.get('ruleset').lower()
     state = module.params.get('state').lower()
-    after = module.params.get('after')
-    enabled = module.params.get('enabled')
-    tls_required = module.params.get('tls_required')
-    recipients = module.params.get('recipients')
-    actions = module.params.get('actions')
-    scan_enabled = module.params.get('scan_enabled')
-
-    check_mode = module.check_mode
-    changed = False
 
     if not HAS_BOTO3:
         module.fail_json(msg='Python module "boto3" is missing, please install it')
@@ -166,81 +299,24 @@ def main():
     if not region:
         module.fail_json(msg='region must be specified')
 
-    try:
-        client = boto3_conn(module, conn_type='client', resource='ses',
-                            region=region, endpoint=ec2_url, **aws_connect_kwargs)
-    except botocore.exceptions.ClientError as e:
-        module.fail_json(msg=e.message, exception=traceback.format_exc(),
-                         **camel_dict_to_snake_dict(e.response))
-    except botocore.exceptions.ParamValidationError as e:
-        module.fail_json(msg=e.message, exception=traceback.format_exc())
+    # Allow up to 10 attempts to call the SES APIs before giving up (9 retries).
+    # SES APIs seem to have a much lower throttling threshold than most of the rest of the AWS APIs.
+    # Docs say 1 call per second. This shouldn't actually be a big problem for normal usage, but
+    # the ansible build runs multiple instances of the test in parallel.
+    # As a result there are build failures due to throttling that exceeds boto's default retries.
+    # The back-off is exponential, so upping the retry attempts allows multiple parallel runs
+    # to succeed.
+    boto_core_config = Config(retries={'max_attempts': 9})
+    client = boto3_conn(module, conn_type='client', resource='ses', region=region, endpoint=ec2_url, config=boto_core_config, **aws_connect_kwargs)
 
-    if not rule_set_exists(client, ruleset):
+    ruleset = module.params.get('ruleset').lower()
+    if not rule_set_exists(module, client, ruleset):
         module.fail_json(msg='Rule set {} does not exist'.format(ruleset))
 
     if state == 'absent':
-        # Remove the rule if present
-        if rule_exists(client, ruleset, name):
-            changed = True
-
-            if not check_mode:
-                try:
-                    client.delete_receipt_rule(
-                        RuleSetName=ruleset,
-                        RuleName=name)
-                except botocore.exceptions.ClientError as e:
-                    module.fail_json(msg=e.message, exception=traceback.format_exc(),
-                                     **camel_dict_to_snake_dict(e.response))
-                except botocore.exceptions.ParamValidationError as e:
-                    module.fail_json(msg=e.message, exception=traceback.format_exc())
-
+        remove_rule(client, module)
     elif state == 'present':
-        create_args = {
-            'RuleSetName': ruleset,
-            'Rule': {
-                'Name': name,
-                'Enabled': enabled,
-                'TlsPolicy': "Require" if tls_required else "Optional",
-                'Recipients': recipients,
-                'Actions': actions,
-                'ScanEnabled': scan_enabled,
-            },
-        }
-
-        if not rule_exists(client, ruleset, name):
-            # Rule doesn't exist, add it
-            changed = True
-
-            if after:
-                create_args.update({
-                    'After': after.lower(),
-                })
-
-            if not check_mode:
-                try:
-                    client.create_receipt_rule(**create_args)
-                except botocore.exceptions.ClientError as e:
-                    module.fail_json(msg=e.message, exception=traceback.format_exc(),
-                                     **camel_dict_to_snake_dict(e.response))
-                except botocore.exceptions.ParamValidationError as e:
-                    module.fail_json(msg=e.message, exception=traceback.format_exc())
-
-        else:
-            # Rule exists, update it
-            # TODO Check if there'll actually be a difference before marking
-            # the module task as changed
-            changed = True
-
-            if not check_mode:
-                try:
-                    client.update_receipt_rule(**create_args)
-                except botocore.exceptions.ClientError as e:
-                    module.fail_json(msg=e.message, exception=traceback.format_exc(),
-                                     **camel_dict_to_snake_dict(e.response))
-                except botocore.exceptions.ParamValidationError as e:
-                    module.fail_json(msg=e.message, exception=traceback.format_exc())
-
-    module.exit_json(changed=changed)
+        create_or_update_rule(client, module)
 
 
 if __name__ == '__main__':
