@@ -20,7 +20,7 @@
 # along with Ansible. If not, see <http://www.gnu.org/licenses/>.
 
 
-ANSIBLE_METADATA = {'metadata_version': '1.0',
+ANSIBLE_METADATA = {'metadata_version': '1.1',
                     'status': ['preview'],
                     'supported_by': 'community'}
 
@@ -38,17 +38,21 @@ requirements: [ "boto3","botocore" ]
 options:
   name:
     description:
-      - The name of the receipt rule set
+      - The name of the receipt rule set.
     required: True
   state:
     description:
-      - Whether to create or destroy the receipt rule set
+      - Whether to create (or update) or destroy the receipt rule set.
     required: False
     default: present
     choices: ["absent", "present"]
-  is_active:
+  active:
     description:
-      - Whether or not to set this rule set as the active one
+      - Whether or not this rule set should be the active rule set. Only has an impact if I(state) is C(present).
+      - If omitted, the active rule set will not be changed.
+      - If C(True) then this rule set will be made active and all others inactive.
+      - if C(False) then this rule set will be deactivated. Be careful with this as you can end up with no active rule set.
+    type: bool
     required: False
     default: False
 extends_documentation_fragment: aws
@@ -61,32 +65,158 @@ EXAMPLES = """
 - name: Create default rule set and activate it if not already
   aws_ses_rule_set:
     name: default-rule-set
-    is_active: yes
+    active: yes
 
 - name: Create some arbitrary rule set but do not activate it
   aws_ses_rule_set:
     name: arbitrary-rule-set
+
+- name: Explicitly deactivate the default rule set leaving no active rule set
+  aws_ses_rule_set:
+    name: default-rule-set
+    active: no
 """
 
 RETURN = """
 changed:
   description: if a SES rule set has been created and/or activated, or deleted
-  returned: always
+  returned: success
   type: bool
-  sample:
-    changed: true
+  sample: true
+is_active:
+  description: if the SES rule set is active
+  returned: success if I(state) is C(present)
+  type: bool
+  sample: true
+receipt_rule_sets:
+  description: The list of SES receipt rule sets that exist after any changes.
+  returned: success
+  type: list
+  sample: [default, arbitary_policy]
+error:
+    description: The details of the error response from AWS.
+    returned: on client error from AWS
+    type: complex
+    sample: {
+        "code": "InvalidParameterValue",
+        "message": "Feedback notification topic is not set.",
+        "type": "Sender"
+    }
+    contains:
+        code:
+            description: The AWS error code.
+            type: string
+        message:
+            description: The AWS error message.
+            type: string
+        type:
+            description: The AWS error type.
+            type: string
 """
 
 from ansible.module_utils.basic import AnsibleModule
 from ansible.module_utils.ec2 import HAS_BOTO3
 from ansible.module_utils.ec2 import ec2_argument_spec
 from ansible.module_utils.ec2 import get_aws_connection_info
+from ansible.module_utils.ec2 import camel_dict_to_snake_dict
 from ansible.module_utils.ec2 import boto3_conn
 
+import traceback
 
-def rule_set_exists(ses_client, name):
-    rule_sets = ses_client.list_receipt_rule_sets()['RuleSets']
-    return any([s for s in rule_sets if s['Name'].lower() == name.lower()])
+try:
+    from botocore.exceptions import BotoCoreError, ClientError
+    from botocore.config import Config
+except ImportError:
+    pass  # caught by imported HAS_BOTO3
+
+
+def call_and_handle_errors(module, method, **kwargs):
+    try:
+        return method(**kwargs)
+    except ClientError as e:
+        module.fail_json(msg=str(e), exception=traceback.format_exc(),
+                         **camel_dict_to_snake_dict(e.response))
+    except BotoCoreError as e:
+        module.fail_json(msg=str(e), exception=traceback.format_exc())
+
+
+def list_receipt_rule_sets(client, module):
+    response = call_and_handle_errors(module, client.list_receipt_rule_sets)
+    return response['RuleSets']
+
+
+def rule_set_in(name, rule_sets):
+    return any([s for s in rule_sets if s['Name'] == name])
+
+
+def update_active_rule_set(client, module, name):
+    desired_active = module.params.get('active')
+    check_mode = module.check_mode
+
+    active_rule_set = call_and_handle_errors(module, client.describe_active_receipt_rule_set)
+    if active_rule_set is not None and 'Metadata' in active_rule_set:
+        is_active = name == active_rule_set['Metadata']['Name']
+    else:
+        # Metadata was not set meaning there is no active rule set
+        is_active = False
+
+    changed = False
+    if desired_active is not None:
+        if desired_active and not is_active:
+            if not check_mode:
+                call_and_handle_errors(module, client.set_active_receipt_rule_set, RuleSetName=name)
+            changed = True
+            is_active = True
+        elif not desired_active and is_active:
+            if not check_mode:
+                call_and_handle_errors(module, client.set_active_receipt_rule_set, RuleSetName=None)
+            changed = True
+            is_active = False
+    return changed, is_active
+
+
+def create_or_update_rule_set(client, module):
+    name = module.params.get('name')
+    check_mode = module.check_mode
+    changed = False
+
+    rule_sets = list_receipt_rule_sets(client, module)
+    if not rule_set_in(name, rule_sets):
+        if not check_mode:
+            call_and_handle_errors(module, client.create_receipt_rule_set, RuleSetName=name)
+        changed = True
+        rule_sets = list(rule_sets)
+        rule_sets.append({
+            'Name': name,
+        })
+
+    (active_changed, is_active) = update_active_rule_set(client, module, name)
+    changed |= active_changed
+
+    module.exit_json(
+        changed=changed,
+        is_active=is_active,
+        receipt_rule_sets=[camel_dict_to_snake_dict(x) for x in rule_sets],
+    )
+
+
+def remove_rule_set(client, module):
+    name = module.params.get('name')
+    check_mode = module.check_mode
+    changed = False
+
+    rule_sets = list_receipt_rule_sets(client, module)
+    if not rule_set_in(name, rule_sets):
+        if not check_mode:
+            call_and_handle_errors(module, client.delete_receipt_rule_set, RuleSetName=name)
+        changed = True
+        rule_sets = [x for x in rule_sets if x['Name'] != name]
+
+    module.exit_json(changed=changed)
+    module.exit_json(
+        changed=changed,
+        receipt_rule_sets=[camel_dict_to_snake_dict(x) for x in rule_sets],
+    )
 
 
 def main():
@@ -100,78 +230,29 @@ def main():
     module = AnsibleModule(argument_spec=argument_spec,
                            supports_check_mode=True)
 
-    name = module.params.get('name').lower()
     state = module.params.get('state').lower()
-    is_active = module.params.get('is_active')
-    check_mode = module.check_mode
-    changed = False
 
     if not HAS_BOTO3:
         module.fail_json(msg='Python module "boto3" is missing, please install it')
 
-    region, ec2_url, aws_connect_kwargs = get_aws_connection_info(module, boto3=True)
+    region, ec2_url, aws_connect_params = get_aws_connection_info(module, boto3=True)
     if not region:
         module.fail_json(msg='region must be specified')
 
-    try:
-        client = boto3_conn(module, conn_type='client', resource='ses',
-                            region=region, endpoint=ec2_url, **aws_connect_kwargs)
-    except (botocore.exceptions.ClientError, botocore.exceptions.ValidationError) as e:
-        module.fail_json(msg=str(e))
+    # Allow up to 10 attempts to call the SES APIs before giving up (9 retries).
+    # SES APIs seem to have a much lower throttling threshold than most of the rest of the AWS APIs.
+    # Docs say 1 call per second. This shouldn't actually be a big problem for normal usage, but
+    # the ansible build runs multiple instances of the test in parallel.
+    # As a result there are build failures due to throttling that exceeds boto's default retries.
+    # The back-off is exponential, so upping the retry attempts allows multiple parallel runs
+    # to succeed.
+    boto_core_config = Config(retries={'max_attempts': 9})
+    client = boto3_conn(module, conn_type='client', resource='ses', region=region, endpoint=ec2_url, config=boto_core_config, **aws_connect_params)
 
     if state == 'absent':
-        # Remove the rule set if present
-        if rule_set_exists(client, name):
-            changed = True
-
-            if not check_mode:
-                try:
-                    client.delete_receipt_rule_set(
-                        RuleSetName=name)
-                except botocore.exceptions.ClientError as e:
-                    module.fail_json(msg=e.message, exception=traceback.format_exc(),
-                                     **camel_dict_to_snake_dict(e.response))
-                except botocore.exceptions.ParamValidationError as e:
-                    module.fail_json(msg=e.message, exception=traceback.format_exc())
-
-    elif state == 'present':
-        # Add rule set if missing
-        if not rule_set_exists(client, name):
-            changed = True
-
-            if not check_mode:
-                try:
-                    client.create_receipt_rule_set(
-                        RuleSetName=name)
-                except botocore.exceptions.ClientError as e:
-                    module.fail_json(msg=e.message, exception=traceback.format_exc(),
-                                     **camel_dict_to_snake_dict(e.response))
-                except botocore.exceptions.ParamValidationError as e:
-                    module.fail_json(msg=e.message, exception=traceback.format_exc())
-
-        # Set active if requested
-        if is_active:
-            # First determine if it's the active rule set
-            try:
-                active_name = client.describe_active_receipt_rule_set()['Metadata']['Name'].lower()
-            except KeyError:
-                # Metadata was not set meaning there is no active rule set
-                active_name = ""
-
-            if name != active_name:
-                changed = True
-
-                if not check_mode:
-                    try:
-                        client.set_active_receipt_rule_set(
-                            RuleSetName=name)
-                    except botocore.exceptions.ClientError as e:
-                        module.fail_json(msg=e.message, exception=traceback.format_exc(),
-                                         **camel_dict_to_snake_dict(e.response))
-                    except botocore.exceptions.ParamValidationError as e:
-                        module.fail_json(msg=e.message, exception=traceback.format_exc())
-
-    module.exit_json(changed=changed)
+        remove_rule_set(client, module)
+    else:
+        create_or_update_rule_set(client, module)
 
 
 if __name__ == '__main__':
