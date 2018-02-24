@@ -261,7 +261,13 @@
             "ses:VerifyDomainIdentity",
             "ses:SetIdentityNotificationTopic",
             "ses:SetIdentityHeadersInNotificationsEnabled",
-            "ses:SetIdentityFeedbackForwardingEnabled"
+            "ses:SetIdentityFeedbackForwardingEnabled",
+            "ses:ListReceiptRuleSets",
+            "ses:DescribeReceiptRuleSet",
+            "ses:DescribeActiveReceiptRuleSet",
+            "ses:SetActiveReceiptRuleSet",
+            "ses:CreateReceiptRuleSet",
+            "ses:DeleteReceiptRuleSet"
           ],
           "Resource": [
             "*"
