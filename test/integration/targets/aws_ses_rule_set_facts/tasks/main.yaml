@@ -1,0 +1,176 @@
+---
+# ============================================================
+- name: test no rule sets
+  block:
+    - name: get facts without specified rule set
+      aws_ses_rule_set_facts:
+        region: "{{ ec2_region }}"
+        aws_access_key: "{{ ec2_access_key }}"
+        aws_secret_key: "{{ ec2_secret_key }}"
+        security_token: "{{security_token}}"
+      register: result
+    - name: assert changed is False
+      assert:
+        that:
+          - result.changed == False
+    - name: assert active_rule_set is None
+      assert:
+        that:
+          - result.active_rule_set is none
+    - name: assert rule_sets is empty
+      assert:
+        that:
+          - result.rule_sets|length == 0
+    - name: assert rule_set is absent
+      assert:
+        that:
+          - "'rule_set' not in result"
+# ============================================================
+- name: test missing rule set
+  block:
+    - name: get facts with specified rule set
+      aws_ses_rule_set_facts:
+        name: no-such-rule-set
+        region: "{{ ec2_region }}"
+        aws_access_key: "{{ ec2_access_key }}"
+        aws_secret_key: "{{ ec2_secret_key }}"
+        security_token: "{{security_token}}"
+      register: result
+      failed_when: "result.error.code != 'RuleSetDoesNotExist'"
+    - name: Error code is RuleSetDoesNotExist
+      assert:
+        that:
+          - "result.error.code == 'RuleSetDoesNotExist'"
+# ============================================================
+- name: test with active rule set
+  block:
+    - name: create active rule set
+      aws_ses_rule_set:
+        name: "{{ default_rule_set }}"
+        active: True
+        region: "{{ ec2_region }}"
+        aws_access_key: "{{ ec2_access_key }}"
+        aws_secret_key: "{{ ec2_secret_key }}"
+        security_token: "{{security_token}}"
+    - name: get facts without specified rule set
+      aws_ses_rule_set_facts:
+        region: "{{ ec2_region }}"
+        aws_access_key: "{{ ec2_access_key }}"
+        aws_secret_key: "{{ ec2_secret_key }}"
+        security_token: "{{security_token}}"
+      register: result
+    - name: assert changed is False
+      assert:
+        that:
+          - result.changed == False
+    - name: assert active_rule_set is correct
+      assert:
+        that:
+          - result.active_rule_set.metadata.name == default_rule_set
+    - name: assert rule_sets contains rule set
+      assert:
+        that:
+          - "default_rule_set in result.rule_sets|map(attribute='name')"
+    - name: assert rule_set is absent
+      assert:
+        that:
+          - "'rule_set' not in result"
+  always:
+    - name: cleanup rule set
+      aws_ses_rule_set:
+        name: "{{ default_rule_set }}"
+        state: absent
+        force: True
+        region: "{{ ec2_region }}"
+        aws_access_key: "{{ ec2_access_key }}"
+        aws_secret_key: "{{ ec2_secret_key }}"
+        security_token: "{{security_token}}"
+# ============================================================
+- name: test with specified rule set
+  block:
+    - name: create rule set
+      aws_ses_rule_set:
+        name: "{{ default_rule_set }}"
+        region: "{{ ec2_region }}"
+        aws_access_key: "{{ ec2_access_key }}"
+        aws_secret_key: "{{ ec2_secret_key }}"
+        security_token: "{{security_token}}"
+    - name: get facts with specified rule set
+      aws_ses_rule_set_facts:
+        name: "{{ default_rule_set }}"
+        region: "{{ ec2_region }}"
+        aws_access_key: "{{ ec2_access_key }}"
+        aws_secret_key: "{{ ec2_secret_key }}"
+        security_token: "{{security_token}}"
+      register: result
+    - name: assert changed is False
+      assert:
+        that:
+          - result.changed == False
+    - name: assert active_rule_set is None
+      assert:
+        that:
+          - result.active_rule_set is none
+    - name: assert rule_sets contains rule set
+      assert:
+        that:
+          - "default_rule_set in result.rule_sets|map(attribute='name')"
+    - name: assert rule_set is correct
+      assert:
+        that:
+          - result.rule_set.metadata.name == default_rule_set
+  always:
+    - name: cleanup rule set
+      aws_ses_rule_set:
+        name: "{{ default_rule_set }}"
+        state: absent
+        force: True
+        region: "{{ ec2_region }}"
+        aws_access_key: "{{ ec2_access_key }}"
+        aws_secret_key: "{{ ec2_secret_key }}"
+        security_token: "{{security_token}}"
+# ============================================================
+- name: test with specified active rule set
+  block:
+    - name: create active rule set
+      aws_ses_rule_set:
+        name: "{{ default_rule_set }}"
+        active: True
+        region: "{{ ec2_region }}"
+        aws_access_key: "{{ ec2_access_key }}"
+        aws_secret_key: "{{ ec2_secret_key }}"
+        security_token: "{{security_token}}"
+    - name: get facts with specified rule set
+      aws_ses_rule_set_facts:
+        name: "{{ default_rule_set }}"
+        region: "{{ ec2_region }}"
+        aws_access_key: "{{ ec2_access_key }}"
+        aws_secret_key: "{{ ec2_secret_key }}"
+        security_token: "{{security_token}}"
+      register: result
+    - name: assert changed is False
+      assert:
+        that:
+          - result.changed == False
+    - name: assert active_rule_set is correct
+      assert:
+        that:
+          - result.active_rule_set.metadata.name == default_rule_set
+    - name: assert rule_sets contains rule set
+      assert:
+        that:
+          - "default_rule_set in result.rule_sets|map(attribute='name')"
+    - name: assert rule_set is correct
+      assert:
+        that:
+          - result.rule_set.metadata.name == default_rule_set
+  always:
+    - name: cleanup rule set
+      aws_ses_rule_set:
+        name: "{{ default_rule_set }}"
+        state: absent
+        force: True
+        region: "{{ ec2_region }}"
+        aws_access_key: "{{ ec2_access_key }}"
+        aws_secret_key: "{{ ec2_secret_key }}"
+        security_token: "{{security_token}}"
