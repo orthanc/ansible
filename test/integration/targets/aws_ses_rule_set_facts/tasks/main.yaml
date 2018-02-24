@@ -1,0 +1,116 @@
+---
+- name: set up aws connection info
+  set_fact:
+    aws_connection_info: &aws_connection_info
+      aws_access_key: "{{ aws_access_key }}"
+      aws_secret_key: "{{ aws_secret_key }}"
+      security_token: "{{ security_token }}"
+      region: "{{ aws_region }}"
+  no_log: yes
+
+# ============================================================
+- name: test no rule sets
+  block:
+    - name: get facts without specified rule set
+      aws_ses_rule_set_facts:
+        <<: *aws_connection_info
+      register: result
+    - name: assert unchanged and no rulesets
+      assert:
+        that:
+          - result.changed == False
+          - result.active_rule_set is none
+          - "default_rule_set not in result.rule_sets|map(attribute='name')"
+          - "'rule_set' not in result"
+# ============================================================
+- name: test missing rule set
+  block:
+    - name: get facts with specified rule set
+      aws_ses_rule_set_facts:
+        name: no-such-rule-set
+        <<: *aws_connection_info
+      register: result
+      failed_when: "result.error.code != 'RuleSetDoesNotExist'"
+    - name: Error code is RuleSetDoesNotExist
+      assert:
+        that:
+          - "result.error.code == 'RuleSetDoesNotExist'"
+# ============================================================
+- name: test with active rule set
+  block:
+    - name: create active rule set
+      aws_ses_rule_set:
+        name: "{{ default_rule_set }}"
+        active: True
+        <<: *aws_connection_info
+    - name: get facts without specified rule set
+      aws_ses_rule_set_facts:
+        <<: *aws_connection_info
+      register: result
+    - name: assert unchanged and rule set is correct
+      assert:
+        that:
+          - result.changed == False
+          - result.active_rule_set.metadata.name == default_rule_set
+          - "default_rule_set in result.rule_sets|map(attribute='name')"
+          - "'rule_set' not in result"
+  always:
+    - name: cleanup rule set
+      aws_ses_rule_set:
+        name: "{{ default_rule_set }}"
+        state: absent
+        force: True
+        <<: *aws_connection_info
+# ============================================================
+- name: test with specified rule set
+  block:
+    - name: create rule set
+      aws_ses_rule_set:
+        name: "{{ default_rule_set }}"
+        <<: *aws_connection_info
+    - name: get facts with specified rule set
+      aws_ses_rule_set_facts:
+        name: "{{ default_rule_set }}"
+        <<: *aws_connection_info
+      register: result
+    - name: assert unchanged and rule set details included
+      assert:
+        that:
+          - result.changed == False
+          - result.active_rule_set is none
+          - "default_rule_set in result.rule_sets|map(attribute='name')"
+          - result.rule_set.metadata.name == default_rule_set
+  always:
+    - name: cleanup rule set
+      aws_ses_rule_set:
+        name: "{{ default_rule_set }}"
+        state: absent
+        force: True
+        <<: *aws_connection_info
+# ============================================================
+- name: test with specified active rule set
+  block:
+    - name: create active rule set
+      aws_ses_rule_set:
+        name: "{{ default_rule_set }}"
+        active: True
+        <<: *aws_connection_info
+    - name: get facts with specified rule set
+      aws_ses_rule_set_facts:
+        name: "{{ default_rule_set }}"
+        <<: *aws_connection_info
+      register: result
+    - name: assert unchanged and rule set details included
+      assert:
+        that:
+          - result.changed == False
+          - result.active_rule_set.metadata.name == default_rule_set
+          - "default_rule_set in result.rule_sets|map(attribute='name')"
+          - result.rule_set.metadata.name == default_rule_set
+  always:
+    - name: cleanup rule set
+      aws_ses_rule_set:
+        name: "{{ default_rule_set }}"
+        state: absent
+        force: True
+        <<: *aws_connection_info
