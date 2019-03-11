@@ -66,6 +66,7 @@ RETURN = '''
 dkim_attributes:
     description: Dictionary with DKIM information
     type: complex
+    returned: always
     sample: {
         "dkim_tokens": [],
         "dkim_enabled": "True",
