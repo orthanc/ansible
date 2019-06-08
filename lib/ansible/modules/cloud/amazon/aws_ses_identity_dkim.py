@@ -123,6 +123,7 @@ def enable_identity_dkim_settings(module, client, identity):
     except (BotoCoreError) as e:
         module.fail_json_aws(e, msg='Failed to enable DKIM for {identity}.'.format(identity=identity))
 
+
 def disable_identity_dkim_settings(module, client, identity):
     try:
         if not module.check_mode:
